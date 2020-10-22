@@ -5,14 +5,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync"
 	"tcpspeeddating/pkg/chatroom"
 	"tcpspeeddating/pkg/textcolour"
-)
-
-var (
-	connections = make(map[net.Conn]struct{})
-	mu          = new(sync.Mutex)
 )
 
 func Run() error {
@@ -24,13 +18,11 @@ func Run() error {
 	for {
 		conn, err := listen.Accept()
 		if err != nil {
-			break
+			return err
 		}
 
 		go handleConn(conn)
 	}
-
-	return nil
 }
 
 func getName(conn net.Conn) string {
@@ -77,25 +69,16 @@ func handleConn(conn net.Conn) {
 	msgSend := make(chan string)
 	done := make(chan struct{})
 
-	mu.Lock()
-	connections[conn] = struct{}{}
-	mu.Unlock()
-	defer func() {
-		mu.Lock()
-		delete(connections, conn)
-		mu.Unlock()
-	}()
-
 	name := getName(conn)
-
 	go writer(conn, msgRecv, done)
+
 	user := chatroom.User{Name: name, In: msgSend, Out: msgRecv}
 	chatroom.AddToPool(user)
+	defer chatroom.Remove(user)
 
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		msgSend <- scanner.Text()
 	}
 	close(done)
-	chatroom.Remove(user)
 }

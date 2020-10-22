@@ -17,7 +17,7 @@ type User struct {
 var (
 	waitingRoom = make(map[string]User)
 	seen        = make(map[string]map[string]struct{})
-	active      = make(map[string]chan User)
+	activeRooms = make(map[string]chan User)
 	mu          = new(sync.Mutex)
 )
 
@@ -46,8 +46,8 @@ func pairer() {
 			_, hasSeen := userSeen[other.Name]
 			if !hasSeen {
 				done := chat(user, other)
-				active[user.Name] = done
-				active[other.Name] = done
+				activeRooms[user.Name] = done
+				activeRooms[other.Name] = done
 				seen[user.Name][other.Name] = struct{}{}
 				seen[other.Name][user.Name] = struct{}{}
 				delete(waitingRoom, user.Name)
@@ -62,33 +62,35 @@ func Available(name string) bool {
 	mu.Lock()
 	defer mu.Unlock()
 	_, inWaiting := waitingRoom[name]
-	_, inActive := active[name]
+	_, inActive := activeRooms[name]
 	return !inWaiting && !inActive
 }
 
 func AddToPool(user User) {
 	fmt.Printf("adding user %s\n", user.Name)
 	mu.Lock()
+	defer func() {
+		mu.Unlock()
+		pairer()
+	}()
 	waitingRoom[user.Name] = user
 	_, ok := seen[user.Name]
 	if !ok {
 		seen[user.Name] = make(map[string]struct{})
 	}
 	user.Out <- textcolour.Green("you're in the pool")
-	mu.Unlock()
-	pairer()
 }
 
 func Remove(user User) {
-    fmt.Printf("removing user %s\n", user.Name)
+	fmt.Printf("removing user %s\n", user.Name)
 	mu.Lock()
 	defer mu.Unlock()
 
-	done, ok := active[user.Name]
+	roomKiller, ok := activeRooms[user.Name]
 	if ok {
 		mu.Unlock()
-		done <- user
-		<-done
+		roomKiller <- user
+		<-roomKiller
 		mu.Lock()
 	}
 
@@ -104,20 +106,20 @@ func chat(a, b User) chan User {
 	done := make(chan User)
 
 	go func() {
-	    reQueueA := false
-	    reQueueB := false
+		reQueueA := false
+		reQueueB := false
 
 		defer func() {
 			mu.Lock()
-			delete(active, a.Name)
-			delete(active, b.Name)
+			delete(activeRooms, a.Name)
+			delete(activeRooms, b.Name)
 			mu.Unlock()
 			if reQueueA {
-			    AddToPool(a)
-            }
-            if reQueueB {
-                AddToPool(b)
-            }
+				AddToPool(a)
+			}
+			if reQueueB {
+				AddToPool(b)
+			}
 		}()
 
 		aLiked := false
@@ -139,8 +141,8 @@ func chat(a, b User) chan User {
 			case msg := <-b.In:
 				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked)
 				if !continueLoop {
-                    reQueueA = true
-                    reQueueB = true
+					reQueueA = true
+					reQueueB = true
 					return
 				}
 			case c := <-done:
