@@ -2,13 +2,16 @@ package tcpserver
 
 import (
 	"bufio"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"tcpspeeddating/pkg/chatroom"
+	"tcpspeeddating/pkg/textcolour"
 )
 
 var (
-	connections = make(map[chan []byte]struct{})
+	connections = make(map[net.Conn]struct{})
 	mu          = new(sync.Mutex)
 )
 
@@ -30,43 +33,69 @@ func Run() error {
 	return nil
 }
 
-func writer(conn net.Conn, messages chan []byte, done chan struct{}) {
+func getName(conn net.Conn) string {
+	_, err := conn.Write([]byte(textcolour.Green("what is your name?\n")))
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Scan()
+	name := strings.Trim(scanner.Text(), " ")
+	for name == "" || !chatroom.Available(name) {
+		var err error
+		if !chatroom.Available(name) {
+			_, err = conn.Write([]byte(textcolour.Red("this username is taken, please try again\n")))
+		} else {
+			_, err = conn.Write([]byte(textcolour.Red("please enter a valid name\n")))
+		}
+		if err != nil {
+			fmt.Println(err)
+		}
+		scanner.Scan()
+		name = strings.Trim(scanner.Text(), " ")
+	}
+	return name
+}
+
+func writer(conn net.Conn, messages chan string, done chan struct{}) {
 	for {
 		select {
 		case m := <-messages:
-			conn.Write(append(m, '\n'))
+			_, err := conn.Write(append([]byte(m), '\n'))
+			if err != nil {
+				fmt.Println(err)
+			}
 		case <-done:
 			return
 		}
 	}
 }
 
-func reader(conn net.Conn, msgSend chan []byte, done chan struct{}) {
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		msgSend <- scanner.Bytes()
-	}
-	close(done)
-}
-
 func handleConn(conn net.Conn) {
-	msgRecv := make(chan []byte)
-	msgSend := make(chan []byte)
+	msgRecv := make(chan string)
+	msgSend := make(chan string)
 	done := make(chan struct{})
 
 	mu.Lock()
-	connections[msgRecv] = struct{}{}
+	connections[conn] = struct{}{}
 	mu.Unlock()
 	defer func() {
 		mu.Lock()
-		delete(connections, msgRecv)
+		delete(connections, conn)
 		mu.Unlock()
 	}()
 
+	name := getName(conn)
+
 	go writer(conn, msgRecv, done)
-	go reader(conn, msgSend, done)
-	chans := chatroom.Chans{In: msgSend, Out: msgRecv}
-	chatroom.AddToPool(chans)
-	<-done
-	chatroom.Remove(chans)
+	user := chatroom.User{Name: name, In: msgSend, Out: msgRecv}
+	chatroom.AddToPool(user)
+
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		msgSend <- scanner.Text()
+	}
+	close(done)
+	chatroom.Remove(user)
 }

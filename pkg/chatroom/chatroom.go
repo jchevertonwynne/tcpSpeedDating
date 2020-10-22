@@ -1,43 +1,33 @@
 package chatroom
 
 import (
+	"fmt"
+	"strings"
 	"sync"
+	"tcpspeeddating/pkg/textcolour"
 	"time"
 )
 
-type Chans struct {
-	In  chan []byte
-	Out chan []byte
+type User struct {
+	Name string
+	In   chan string
+	Out  chan string
 }
 
 var (
-	waitingRoom = make(map[Chans]struct{})
-	seen        = make(map[Chans]map[Chans]struct{})
-	active      = make(map[Chans]chan Chans)
+	waitingRoom = make(map[string]User)
+	seen        = make(map[string]map[string]struct{})
+	active      = make(map[string]chan User)
 	mu          = new(sync.Mutex)
 )
 
 func StartChat() {
-	waitingMessage := []byte("waiting for more people...")
+	waitingMessage := "waiting for more people..."
 
 	for {
 		time.Sleep(5 * time.Second)
 		mu.Lock()
-		for w := range waitingRoom {
-		loop:
-			for {
-				select {
-				case msg := <-w.In:
-					for wOther := range waitingRoom {
-						if w != wOther {
-							wOther.Out <- msg
-						}
-					}
-				default:
-					break loop
-				}
-			}
-
+		for _, w := range waitingRoom {
 			w.Out <- waitingMessage
 		}
 		mu.Unlock()
@@ -47,100 +37,118 @@ func StartChat() {
 func pairer() {
 	mu.Lock()
 	defer mu.Unlock()
-	for user := range waitingRoom {
-		userSeen := seen[user]
-		for other := range waitingRoom {
-			if other == user {
+	for username, user := range waitingRoom {
+		userSeen := seen[user.Name]
+		for othername, other := range waitingRoom {
+			if username == othername {
 				continue
 			}
-			_, hasSeen := userSeen[other]
+			_, hasSeen := userSeen[other.Name]
 			if !hasSeen {
 				done := chat(user, other)
-				active[user] = done
-				active[other] = done
-				seen[user][other] = struct{}{}
-				seen[other][user] = struct{}{}
-				delete(waitingRoom, user)
-				delete(waitingRoom, other)
+				active[user.Name] = done
+				active[other.Name] = done
+				seen[user.Name][other.Name] = struct{}{}
+				seen[other.Name][user.Name] = struct{}{}
+				delete(waitingRoom, user.Name)
+				delete(waitingRoom, other.Name)
 				return
 			}
 		}
 	}
 }
 
-func AddToPool(chans Chans) {
+func Available(name string) bool {
 	mu.Lock()
+	defer mu.Unlock()
+	_, inWaiting := waitingRoom[name]
+	_, inActive := active[name]
+	return !inWaiting && !inActive
+}
 
-	waitingRoom[chans] = struct{}{}
-	_, s := seen[chans]
-	if !s {
-		seen[chans] = make(map[Chans]struct{})
+func AddToPool(user User) {
+	fmt.Printf("adding user %s\n", user.Name)
+	mu.Lock()
+	waitingRoom[user.Name] = user
+	_, ok := seen[user.Name]
+	if !ok {
+		seen[user.Name] = make(map[string]struct{})
 	}
-	chans.Out <- []byte("\u001b[31myou're in the pool\u001b[0m")
-
+	user.Out <- textcolour.Green("you're in the pool")
 	mu.Unlock()
-
 	pairer()
 }
 
-func Remove(chans Chans) {
+func Remove(user User) {
+    fmt.Printf("removing user %s\n", user.Name)
 	mu.Lock()
 	defer mu.Unlock()
 
-	done, ok := active[chans]
+	done, ok := active[user.Name]
 	if ok {
 		mu.Unlock()
-		done <- chans
+		done <- user
 		<-done
 		mu.Lock()
 	}
 
-	delete(waitingRoom, chans)
-	delete(seen, chans)
-	delete(active, chans)
+	delete(waitingRoom, user.Name)
+	delete(seen, user.Name)
 	for _, others := range seen {
-		delete(others, chans)
+		delete(others, user.Name)
 	}
 }
 
-func chat(a, b Chans) chan Chans {
-	done := make(chan Chans)
+func chat(a, b User) chan User {
+	fmt.Printf("making chat with %s and %s\n", a.Name, b.Name)
+	done := make(chan User)
 
 	go func() {
+	    reQueueA := false
+	    reQueueB := false
+
 		defer func() {
 			mu.Lock()
-			defer mu.Unlock()
-			delete(active, a)
-			delete(active, b)
+			delete(active, a.Name)
+			delete(active, b.Name)
+			mu.Unlock()
+			if reQueueA {
+			    AddToPool(a)
+            }
+            if reQueueB {
+                AddToPool(b)
+            }
 		}()
 
-		msg := red("you're now in a room")
+		aLiked := false
+		bLiked := false
+
+		msg := textcolour.Red("you're now in a room")
 		a.Out <- msg
 		b.Out <- msg
-	loop:
+
 		for {
 			select {
-			case m := <-a.In:
-				if string(m) == ".next" {
-					b.Out <- red("rejected")
-					AddToPool(a)
-					AddToPool(b)
-					break loop
+			case msg := <-a.In:
+				continueLoop := processMessage(msg, a, b, &aLiked, &bLiked)
+				if !continueLoop {
+					reQueueA = true
+					reQueueB = true
+					return
 				}
-				b.Out <- magenta(string(m))
-			case m := <-b.In:
-				if string(m) == ".next" {
-					a.Out <- red("rejected")
-					AddToPool(a)
-					AddToPool(b)
-					break loop
+			case msg := <-b.In:
+				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked)
+				if !continueLoop {
+                    reQueueA = true
+                    reQueueB = true
+					return
 				}
-				a.Out <- magenta(string(m))
 			case c := <-done:
-				if c == a {
-					AddToPool(b)
+				fmt.Printf("%s of chat (%s, %s) has disconnected, returning other to pool\n", c.Name, a.Name, b.Name)
+				if c.Name == a.Name {
+					reQueueB = true
 				} else {
-					AddToPool(a)
+					reQueueA = true
 				}
 				close(done)
 				return
@@ -151,14 +159,19 @@ func chat(a, b Chans) chan Chans {
 	return done
 }
 
-func red(msg string) []byte {
-	return formatColour(msg, []byte("\u001b[31m"))
-}
-
-func magenta(msg string) []byte {
-	return formatColour(msg, []byte("\u001b[35m"))
-}
-
-func formatColour(msg string, colour []byte) []byte {
-	return append(append(colour, msg...), []byte("\u001b[0m")...)
+func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
+	msg = strings.Trim(msg, " ")
+	if msg == ".next" {
+		b.Out <- textcolour.Red("rejected")
+		return false
+	} else if msg == ".like" {
+		*aLiked = true
+		if *bLiked {
+			a.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", b.Name))
+			b.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", a.Name))
+		}
+		return true
+	}
+	b.Out <- textcolour.Blue(msg)
+	return true
 }

@@ -16,5 +16,8 @@ func main() {
 		}
 	}()
 	go chatroom.StartChat()
-	tcpserver.Run()
+    err := tcpserver.Run()
+    if err != nil {
+        fmt.Println(err)
+    }
 }
