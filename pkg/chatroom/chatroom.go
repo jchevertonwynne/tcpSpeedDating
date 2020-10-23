@@ -17,7 +17,7 @@ type User struct {
 var (
 	waitingRoom = make(map[string]User)
 	seen        = make(map[string]map[string]struct{})
-	activeRooms = make(map[string]chan User)
+	activeRooms = make(map[string]chan string)
 	mu          = new(sync.Mutex)
 )
 
@@ -27,8 +27,8 @@ func StartChat() {
 	for {
 		time.Sleep(5 * time.Second)
 		mu.Lock()
-		for _, w := range waitingRoom {
-			w.Out <- waitingMessage
+		for _, waiting := range waitingRoom {
+			waiting.Out <- waitingMessage
 		}
 		mu.Unlock()
 	}
@@ -89,7 +89,7 @@ func Remove(user User) {
 	roomKiller, ok := activeRooms[user.Name]
 	if ok {
 		mu.Unlock()
-		roomKiller <- user
+		roomKiller <- user.Name
 		<-roomKiller
 		mu.Lock()
 	}
@@ -101,9 +101,9 @@ func Remove(user User) {
 	}
 }
 
-func chat(a, b User) chan User {
+func chat(a, b User) chan string {
 	fmt.Printf("making chat with %s and %s\n", a.Name, b.Name)
-	done := make(chan User)
+	done := make(chan string)
 
 	go func() {
 		reQueueA := false
@@ -132,22 +132,18 @@ func chat(a, b User) chan User {
 		for {
 			select {
 			case msg := <-a.In:
-				continueLoop := processMessage(msg, a, b, &aLiked, &bLiked)
+				continueLoop := processMessage(msg, a, b, &aLiked, &bLiked, &reQueueA, &reQueueB)
 				if !continueLoop {
-					reQueueA = true
-					reQueueB = true
 					return
 				}
 			case msg := <-b.In:
-				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked)
+				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked, &reQueueA, &reQueueB)
 				if !continueLoop {
-					reQueueA = true
-					reQueueB = true
 					return
 				}
 			case c := <-done:
-				fmt.Printf("%s of chat (%s, %s) has disconnected, returning other to pool\n", c.Name, a.Name, b.Name)
-				if c.Name == a.Name {
+				fmt.Printf("%s of chat (%s, %s) has disconnected, returning other to pool\n", c, a.Name, b.Name)
+				if c == a.Name {
 					reQueueB = true
 				} else {
 					reQueueA = true
@@ -161,16 +157,30 @@ func chat(a, b User) chan User {
 	return done
 }
 
-func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
+func processMessage(msg string, a, b User, aLiked, bLiked, reQueueA, reQueueB *bool) bool {
 	msg = strings.Trim(msg, " ")
 	if msg == ".next" {
-		b.Out <- textcolour.Red("rejected")
+		*reQueueA = true
+		*reQueueB = true
+		if !(*aLiked && *bLiked) {
+			b.Out <- textcolour.Red("rejected")
+		}
 		return false
 	} else if msg == ".like" {
-		*aLiked = true
-		if *bLiked {
-			a.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", b.Name))
-			b.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", a.Name))
+		if *aLiked {
+			if *bLiked {
+				a.Out <- textcolour.Magenta(fmt.Sprintf("you and %s already like each other!", b.Name))
+			} else {
+				a.Out <- textcolour.Magenta("you have already liked the other person!")
+			}
+		} else {
+			*aLiked = true
+			if *bLiked {
+				a.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", b.Name))
+				b.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", a.Name))
+			} else {
+				a.Out <- textcolour.Magenta("you like the other person")
+			}
 		}
 		return true
 	}
