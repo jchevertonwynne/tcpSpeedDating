@@ -29,6 +29,14 @@ func StartChat() {
 		mu.Lock()
 		for _, waiting := range waitingRoom {
 			waiting.Out <- waitingMessage
+loop:
+			for {
+				select {
+				case <-waiting.In:
+				default:
+					break loop
+				}
+			}
 		}
 		mu.Unlock()
 	}
@@ -66,8 +74,8 @@ func Available(name string) bool {
 	return !inWaiting && !inActive
 }
 
-func AddToPool(user User) {
-	fmt.Printf("adding user %s\n", user.Name)
+func AddToWaitingRoom(user User) {
+
 	mu.Lock()
 	defer func() {
 		mu.Unlock()
@@ -76,9 +84,12 @@ func AddToPool(user User) {
 	waitingRoom[user.Name] = user
 	_, ok := seen[user.Name]
 	if !ok {
+		fmt.Printf("adding new user %s to waiting room\n", user.Name)
 		seen[user.Name] = make(map[string]struct{})
+	} else {
+		fmt.Printf("returning user %s to waiting room\n", user.Name)
 	}
-	user.Out <- textcolour.Green("you're in the pool")
+	user.Out <- textcolour.Green("you're in the waiting room")
 }
 
 func Remove(user User) {
@@ -105,6 +116,10 @@ func chat(a, b User) chan string {
 	fmt.Printf("making chat with %s and %s\n", a.Name, b.Name)
 	done := make(chan string)
 
+	msg := textcolour.Green("type .like if you like someone and .next to go back to waiting room for your next match")
+	a.Out <- msg
+	b.Out <- msg
+
 	go func() {
 		reQueueA := false
 		reQueueB := false
@@ -115,10 +130,10 @@ func chat(a, b User) chan string {
 			delete(activeRooms, b.Name)
 			mu.Unlock()
 			if reQueueA {
-				AddToPool(a)
+				AddToWaitingRoom(a)
 			}
 			if reQueueB {
-				AddToPool(b)
+				AddToWaitingRoom(b)
 			}
 		}()
 
@@ -132,17 +147,21 @@ func chat(a, b User) chan string {
 		for {
 			select {
 			case msg := <-a.In:
-				continueLoop := processMessage(msg, a, b, &aLiked, &bLiked, &reQueueA, &reQueueB)
+				continueLoop := processMessage(msg, a, b, &aLiked, &bLiked)
 				if !continueLoop {
+					reQueueA = true
+					reQueueB = true
 					return
 				}
 			case msg := <-b.In:
-				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked, &reQueueA, &reQueueB)
+				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked)
 				if !continueLoop {
+					reQueueA = true
+					reQueueB = true
 					return
 				}
 			case c := <-done:
-				fmt.Printf("%s of chat (%s, %s) has disconnected, returning other to pool\n", c, a.Name, b.Name)
+				fmt.Printf("%s of chat (%s, %s) has disconnected, returning other to waiting room\n", c, a.Name, b.Name)
 				if c == a.Name {
 					reQueueB = true
 				} else {
@@ -157,12 +176,10 @@ func chat(a, b User) chan string {
 	return done
 }
 
-func processMessage(msg string, a, b User, aLiked, bLiked, reQueueA, reQueueB *bool) bool {
+func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
 	msg = strings.Trim(msg, " ")
 	if msg == ".next" {
-		*reQueueA = true
-		*reQueueB = true
-		if !(*aLiked && *bLiked) {
+		if *bLiked && !*aLiked {
 			b.Out <- textcolour.Red("rejected")
 		}
 		return false

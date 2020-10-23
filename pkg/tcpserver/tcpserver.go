@@ -57,6 +57,10 @@ func writer(conn net.Conn, messages chan string, done chan struct{}) {
 			_, err := conn.Write(append([]byte(m), '\n'))
 			if err != nil {
 				fmt.Println(err)
+				err := conn.Close()
+				if err != nil {
+					fmt.Println(err)
+				}
 			}
 		case <-done:
 			return
@@ -65,15 +69,15 @@ func writer(conn net.Conn, messages chan string, done chan struct{}) {
 }
 
 func handleConn(conn net.Conn) {
-	msgRecv := make(chan string)
-	msgSend := make(chan string)
+	msgRecv := make(chan string, 10)
+	msgSend := make(chan string, 10)
 	done := make(chan struct{})
 
 	name := getName(conn)
 	go writer(conn, msgRecv, done)
 
 	user := chatroom.User{Name: name, In: msgSend, Out: msgRecv}
-	chatroom.AddToPool(user)
+	chatroom.AddToWaitingRoom(user)
 	defer chatroom.Remove(user)
 
 	scanner := bufio.NewScanner(conn)
