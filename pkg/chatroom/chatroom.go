@@ -8,16 +8,18 @@ import (
 	"time"
 )
 
+type Username string
+
 type User struct {
-	Name string
+	Name Username
 	In   chan string
 	Out  chan string
 }
 
 var (
-	waitingRoom = make(map[string]User)
-	seen        = make(map[string]map[string]struct{})
-	activeRooms = make(map[string]chan string)
+	waitingRoom = make(map[Username]User)
+	seen        = make(map[Username]map[Username]struct{})
+	activeRooms = make(map[Username]chan Username)
 	mu          = new(sync.Mutex)
 )
 
@@ -29,7 +31,7 @@ func StartChat() {
 		mu.Lock()
 		for _, waiting := range waitingRoom {
 			waiting.Out <- waitingMessage
-loop:
+		loop:
 			for {
 				select {
 				case <-waiting.In:
@@ -40,6 +42,31 @@ loop:
 		}
 		mu.Unlock()
 	}
+}
+
+func Available(name Username) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	_, inWaiting := waitingRoom[name]
+	_, inActive := activeRooms[name]
+	return !inWaiting && !inActive
+}
+
+func AddToWaitingRoom(user User) {
+	mu.Lock()
+	defer func() {
+		mu.Unlock()
+		pairer()
+	}()
+	waitingRoom[user.Name] = user
+	_, ok := seen[user.Name]
+	if !ok {
+		fmt.Printf("adding new user %s to waiting room\n", user.Name)
+		seen[user.Name] = make(map[Username]struct{})
+	} else {
+		fmt.Printf("returning user %s to waiting room\n", user.Name)
+	}
+	user.Out <- textcolour.Green("you're in the waiting room")
 }
 
 func pairer() {
@@ -66,32 +93,6 @@ func pairer() {
 	}
 }
 
-func Available(name string) bool {
-	mu.Lock()
-	defer mu.Unlock()
-	_, inWaiting := waitingRoom[name]
-	_, inActive := activeRooms[name]
-	return !inWaiting && !inActive
-}
-
-func AddToWaitingRoom(user User) {
-
-	mu.Lock()
-	defer func() {
-		mu.Unlock()
-		pairer()
-	}()
-	waitingRoom[user.Name] = user
-	_, ok := seen[user.Name]
-	if !ok {
-		fmt.Printf("adding new user %s to waiting room\n", user.Name)
-		seen[user.Name] = make(map[string]struct{})
-	} else {
-		fmt.Printf("returning user %s to waiting room\n", user.Name)
-	}
-	user.Out <- textcolour.Green("you're in the waiting room")
-}
-
 func Remove(user User) {
 	fmt.Printf("removing user %s\n", user.Name)
 	mu.Lock()
@@ -112,9 +113,9 @@ func Remove(user User) {
 	}
 }
 
-func chat(a, b User) chan string {
+func chat(a, b User) chan Username {
 	fmt.Printf("making chat with %s and %s\n", a.Name, b.Name)
-	done := make(chan string)
+	done := make(chan Username)
 
 	msg := textcolour.Green("type .like if you like someone and .next to go back to waiting room for your next match")
 	a.Out <- msg
@@ -178,12 +179,13 @@ func chat(a, b User) chan string {
 
 func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
 	msg = strings.Trim(msg, " ")
-	if msg == ".next" {
+	switch msg {
+	case ".next":
 		if *bLiked && !*aLiked {
 			b.Out <- textcolour.Red("rejected")
 		}
 		return false
-	} else if msg == ".like" {
+	case ".like":
 		if *aLiked {
 			if *bLiked {
 				a.Out <- textcolour.Magenta(fmt.Sprintf("you and %s already like each other!", b.Name))
@@ -199,8 +201,15 @@ func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
 				a.Out <- textcolour.Magenta("you like the other person")
 			}
 		}
-		return true
+	case ".heart":
+		msg = "❤️"
+		fallthrough
+	default:
+		if *aLiked && *bLiked {
+			b.Out <- string(a.Name) + ": " + textcolour.Blue(msg)
+		} else {
+			b.Out <- "anon: " + textcolour.Blue(msg)
+		}
 	}
-	b.Out <- textcolour.Blue(msg)
 	return true
 }

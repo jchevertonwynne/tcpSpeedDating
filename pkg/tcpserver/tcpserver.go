@@ -25,7 +25,7 @@ func Run() error {
 	}
 }
 
-func getName(conn net.Conn) string {
+func getName(conn net.Conn) chatroom.Username {
 	_, err := conn.Write([]byte(textcolour.Green("what is your name?\n")))
 	if err != nil {
 		fmt.Println(err)
@@ -33,7 +33,7 @@ func getName(conn net.Conn) string {
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Scan()
-	name := strings.Trim(scanner.Text(), " ")
+	name := chatroom.Username(strings.Trim(scanner.Text(), " "))
 	for name == "" || !chatroom.Available(name) {
 		var err error
 		if !chatroom.Available(name) {
@@ -45,7 +45,7 @@ func getName(conn net.Conn) string {
 			fmt.Println(err)
 		}
 		scanner.Scan()
-		name = strings.Trim(scanner.Text(), " ")
+		name = chatroom.Username(strings.Trim(scanner.Text(), " "))
 	}
 	return name
 }
@@ -61,6 +61,7 @@ func writer(conn net.Conn, messages chan string, done chan struct{}) {
 				if err != nil {
 					fmt.Println(err)
 				}
+				return
 			}
 		case <-done:
 			return
