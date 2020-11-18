@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"tcpspeeddating/pkg/chatroom"
@@ -12,12 +12,12 @@ func main() {
 	go func() {
 		err := http.ListenAndServe(":5000", nil)
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 	}()
 	go chatroom.StartChat()
 	err := tcpserver.Run()
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 }

@@ -2,24 +2,24 @@ package chatroom
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"tcpspeeddating/pkg/textcolour"
 	"time"
 )
 
-type Username string
-
-type User struct {
-	Name Username
-	In   chan string
-	Out  chan string
+type username string
+type user struct {
+	name username
+	in   chan string
+	out  chan string
 }
 
 var (
-	waitingRoom = make(map[Username]User)
-	seen        = make(map[Username]map[Username]struct{})
-	activeRooms = make(map[Username]chan Username)
+	waitingRoom = make(map[username]user)
+	seen        = make(map[username]map[username]struct{})
+	activeRooms = make(map[username]chan username)
 	mu          = new(sync.Mutex)
 )
 
@@ -30,11 +30,11 @@ func StartChat() {
 		time.Sleep(5 * time.Second)
 		mu.Lock()
 		for _, waiting := range waitingRoom {
-			waiting.Out <- waitingMessage
+			waiting.out <- waitingMessage
 		loop:
 			for {
 				select {
-				case <-waiting.In:
+				case <-waiting.in:
 				default:
 					break loop
 				}
@@ -44,126 +44,137 @@ func StartChat() {
 	}
 }
 
-func Available(name Username) bool {
+func Available(name string) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	_, inWaiting := waitingRoom[name]
-	_, inActive := activeRooms[name]
+	_, inWaiting := waitingRoom[username(name)]
+	_, inActive := activeRooms[username(name)]
 	return !inWaiting && !inActive
 }
 
-func AddToWaitingRoom(user User) {
+func Add(name string, in, out chan string) func() {
+	username := username(name)
+	user := user{username, in, out}
+	addToWaitingRoom(user)
+
+	return func() {
+		log.Printf("removing user %q\n", name)
+		mu.Lock()
+
+		roomKiller, ok := activeRooms[username]
+		if ok {
+			mu.Unlock()
+			roomKiller <- username
+			<-roomKiller
+			mu.Lock()
+		}
+
+		delete(waitingRoom, username)
+		delete(seen, username)
+		for _, others := range seen {
+			delete(others, username)
+		}
+		mu.Unlock()
+	}
+}
+
+func addToWaitingRoom(user user) {
 	mu.Lock()
 	defer func() {
 		mu.Unlock()
 		pairer()
 	}()
-	waitingRoom[user.Name] = user
-	_, ok := seen[user.Name]
+
+	waitingRoom[user.name] = user
+
+	_, ok := seen[user.name]
 	if !ok {
-		fmt.Printf("adding new user %s to waiting room\n", user.Name)
-		seen[user.Name] = make(map[Username]struct{})
+		log.Printf("adding new user %q to waiting room\n", user.name)
+		seen[user.name] = make(map[username]struct{})
 	} else {
-		fmt.Printf("returning user %s to waiting room\n", user.Name)
+		log.Printf("returning user %q to waiting room\n", user.name)
 	}
-	user.Out <- textcolour.Green("you're in the waiting room")
+
+	user.out <- textcolour.Green("you're in the waiting room")
 }
 
 func pairer() {
 	mu.Lock()
 	defer mu.Unlock()
+
 	for username, user := range waitingRoom {
-		userSeen := seen[user.Name]
+		userSeen := seen[user.name]
 		for othername, other := range waitingRoom {
 			if username == othername {
 				continue
 			}
-			_, hasSeen := userSeen[other.Name]
+
+			_, hasSeen := userSeen[other.name]
 			if !hasSeen {
 				done := chat(user, other)
-				activeRooms[user.Name] = done
-				activeRooms[other.Name] = done
-				seen[user.Name][other.Name] = struct{}{}
-				seen[other.Name][user.Name] = struct{}{}
-				delete(waitingRoom, user.Name)
-				delete(waitingRoom, other.Name)
+				activeRooms[user.name] = done
+				activeRooms[other.name] = done
+				seen[user.name][other.name] = struct{}{}
+				seen[other.name][user.name] = struct{}{}
+				delete(waitingRoom, user.name)
+				delete(waitingRoom, other.name)
 				return
 			}
 		}
 	}
 }
 
-func Remove(user User) {
-	fmt.Printf("removing user %s\n", user.Name)
-	mu.Lock()
-	defer mu.Unlock()
-
-	roomKiller, ok := activeRooms[user.Name]
-	if ok {
-		mu.Unlock()
-		roomKiller <- user.Name
-		<-roomKiller
-		mu.Lock()
-	}
-
-	delete(waitingRoom, user.Name)
-	delete(seen, user.Name)
-	for _, others := range seen {
-		delete(others, user.Name)
-	}
-}
-
-func chat(a, b User) chan Username {
-	fmt.Printf("making chat with %s and %s\n", a.Name, b.Name)
-	done := make(chan Username)
-
-	msg := textcolour.Green("type .like if you like someone and .next to go back to waiting room for your next match")
-	a.Out <- msg
-	b.Out <- msg
+func chat(a, b user) chan username {
+	log.Printf("making chat with %q and %q\n", a.name, b.name)
+	done := make(chan username)
 
 	go func() {
 		reQueueA := false
 		reQueueB := false
 
-		defer func() {
-			mu.Lock()
-			delete(activeRooms, a.Name)
-			delete(activeRooms, b.Name)
-			mu.Unlock()
-			if reQueueA {
-				AddToWaitingRoom(a)
-			}
-			if reQueueB {
-				AddToWaitingRoom(b)
-			}
-		}()
-
 		aLiked := false
 		bLiked := false
 
-		msg := textcolour.Red("you're now in a room")
-		a.Out <- msg
-		b.Out <- msg
+		defer func() {
+			mu.Lock()
+			delete(activeRooms, a.name)
+			delete(activeRooms, b.name)
+			mu.Unlock()
+			if reQueueA {
+				addToWaitingRoom(a)
+			}
+			if reQueueB {
+				addToWaitingRoom(b)
+			}
+		}()
+
+		msg := textcolour.Green("type .like if you like someone and .next to go back to waiting room for your next match")
+		a.out <- msg
+		b.out <- msg
+
+		msg = textcolour.Red("you're now in a room")
+		a.out <- msg
+		b.out <- msg
 
 		for {
 			select {
-			case msg := <-a.In:
+			case msg := <-a.in:
 				continueLoop := processMessage(msg, a, b, &aLiked, &bLiked)
 				if !continueLoop {
 					reQueueA = true
 					reQueueB = true
 					return
 				}
-			case msg := <-b.In:
+			case msg := <-b.in:
 				continueLoop := processMessage(msg, b, a, &bLiked, &aLiked)
 				if !continueLoop {
 					reQueueA = true
 					reQueueB = true
 					return
 				}
-			case c := <-done:
-				fmt.Printf("%s of chat (%s, %s) has disconnected, returning other to waiting room\n", c, a.Name, b.Name)
-				if c == a.Name {
+			case exitingUser := <-done:
+				log.Printf("%q of chat (%q, %q) has disconnected, returning other to waiting room\n", exitingUser, a.name, b.name)
+				if exitingUser == a.name {
 					reQueueB = true
 				} else {
 					reQueueA = true
@@ -177,28 +188,28 @@ func chat(a, b User) chan Username {
 	return done
 }
 
-func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
+func processMessage(msg string, a, b user, aLiked, bLiked *bool) bool {
 	msg = strings.Trim(msg, " ")
 	switch msg {
 	case ".next":
 		if *bLiked && !*aLiked {
-			b.Out <- textcolour.Red("rejected")
+			b.out <- textcolour.Red("rejected")
 		}
 		return false
 	case ".like":
 		if *aLiked {
 			if *bLiked {
-				a.Out <- textcolour.Magenta(fmt.Sprintf("you and %s already like each other!", b.Name))
+				a.out <- textcolour.Magenta("you and %s already like each other!", b.name)
 			} else {
-				a.Out <- textcolour.Magenta("you have already liked the other person!")
+				a.out <- textcolour.Magenta("you have already liked the other person!")
 			}
 		} else {
 			*aLiked = true
 			if *bLiked {
-				a.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", b.Name))
-				b.Out <- textcolour.Magenta(fmt.Sprintf("%s likes you too!", a.Name))
+				a.out <- textcolour.Magenta("%s likes you too!", b.name)
+				b.out <- textcolour.Magenta("%s likes you too!", a.name)
 			} else {
-				a.Out <- textcolour.Magenta("you like the other person")
+				a.out <- textcolour.Magenta("you like the other person")
 			}
 		}
 	case ".heart":
@@ -206,9 +217,9 @@ func processMessage(msg string, a, b User, aLiked, bLiked *bool) bool {
 		fallthrough
 	default:
 		if *aLiked && *bLiked {
-			b.Out <- string(a.Name) + ": " + textcolour.Blue(msg)
+			b.out <- fmt.Sprintf("%s: %s", a.name, textcolour.Blue(msg))
 		} else {
-			b.Out <- "anon: " + textcolour.Blue(msg)
+			b.out <- "anon: " + textcolour.Blue(msg)
 		}
 	}
 	return true

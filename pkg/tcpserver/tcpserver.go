@@ -3,6 +3,7 @@ package tcpserver
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"tcpspeeddating/pkg/chatroom"
@@ -20,20 +21,19 @@ func Run() error {
 		if err != nil {
 			return err
 		}
-
 		go handleConn(conn)
 	}
 }
 
-func getName(conn net.Conn) chatroom.Username {
+func getName(conn net.Conn) string {
 	_, err := conn.Write([]byte(textcolour.Green("what is your name?\n")))
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Scan()
-	name := chatroom.Username(strings.Trim(scanner.Text(), " "))
+	name := strings.Trim(scanner.Text(), " ")
 	for name == "" || !chatroom.Available(name) {
 		var err error
 		if !chatroom.Available(name) {
@@ -42,44 +42,46 @@ func getName(conn net.Conn) chatroom.Username {
 			_, err = conn.Write([]byte(textcolour.Red("please enter a valid name\n")))
 		}
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 		scanner.Scan()
-		name = chatroom.Username(strings.Trim(scanner.Text(), " "))
+		name = strings.Trim(scanner.Text(), " ")
 	}
 	return name
 }
 
-func writer(conn net.Conn, messages chan string, done chan struct{}) {
-	for {
-		select {
-		case m := <-messages:
-			_, err := conn.Write(append([]byte(m), '\n'))
-			if err != nil {
-				fmt.Println(err)
-				err := conn.Close()
+func writer(conn net.Conn, messages chan string) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case msg := <-messages:
+				_, err := fmt.Fprintf(conn, "%s\n", msg)
 				if err != nil {
-					fmt.Println(err)
+					log.Println(err)
+					err := conn.Close()
+					if err != nil {
+						log.Println(err)
+					}
+					return
 				}
+			case <-done:
 				return
 			}
-		case <-done:
-			return
 		}
-	}
+	}()
+	return done
 }
 
 func handleConn(conn net.Conn) {
-	msgRecv := make(chan string, 10)
-	msgSend := make(chan string, 10)
-	done := make(chan struct{})
+	msgRecv := make(chan string)
+	msgSend := make(chan string)
 
 	name := getName(conn)
-	go writer(conn, msgRecv, done)
+	done := writer(conn, msgRecv)
 
-	user := chatroom.User{Name: name, In: msgSend, Out: msgRecv}
-	chatroom.AddToWaitingRoom(user)
-	defer chatroom.Remove(user)
+	remove := chatroom.Add(name, msgSend, msgRecv)
+	defer remove()
 
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
